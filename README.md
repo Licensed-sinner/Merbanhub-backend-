@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # MerbanHub Backend
 
 This is the backend service for the **MerbanHub Capital Document Management System** – a prototype built using **Java Spring Boot**. It powers user authentication, document upload, and OCR-based indexing features.
