@@ -10,9 +10,12 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.io.IOException;
+// ...existing code...
 import org.springframework.core.io.Resource;
 import org.springframework.http.*;
+import org.springframework.web.client.RestTemplate;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
+import org.springframework.core.io.ByteArrayResource;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
@@ -54,6 +57,48 @@ public class DocumentController {
     if (opt.isEmpty()) return ResponseEntity.notFound().build();
 
     Path p = opt.get();
+    // If the DocumentSearchService is configured to use a remote OCR API, the stored Path
+    // may actually be a remote URL in filePath. Detect remote mode and proxy the file.
+    if (documentSearchService.isRemote()) {
+        String remoteUrl = p.toString();
+        try {
+            RestTemplate rt = new RestTemplate(new SimpleClientHttpRequestFactory());
+            org.springframework.http.HttpHeaders remoteHeaders = new org.springframework.http.HttpHeaders();
+            String token = documentSearchService.getOcrApiToken();
+            if (token != null && !token.isBlank()) {
+                remoteHeaders.set("Authorization", "Bearer " + token);
+            }
+            org.springframework.http.HttpEntity<Void> req = new org.springframework.http.HttpEntity<>(remoteHeaders);
+            ResponseEntity<byte[]> resp = rt.exchange(remoteUrl, org.springframework.http.HttpMethod.GET, req, byte[].class);
+            if (!resp.getStatusCode().is2xxSuccessful()) {
+                return ResponseEntity.status(HttpStatus.BAD_GATEWAY).build();
+            }
+            byte[] body = resp.getBody();
+            if (body == null) return ResponseEntity.status(HttpStatus.BAD_GATEWAY).build();
+            String filename = Paths.get(p.toString()).getFileName().toString();
+            String encodedFilename = URLEncoder.encode(filename, StandardCharsets.UTF_8.toString()).replace("+", "%20");
+
+            HttpHeaders responseHeaders = new HttpHeaders();
+            responseHeaders.setContentType(MediaType.APPLICATION_PDF);
+            responseHeaders.setContentDisposition(org.springframework.http.ContentDisposition.builder("inline")
+                .filename(encodedFilename)
+                .build());
+            responseHeaders.setCacheControl("max-age=3600, must-revalidate");
+
+            ByteArrayResource resource = new ByteArrayResource(body) {
+                @Override public String getFilename() { return filename; }
+            };
+
+            return ResponseEntity.ok()
+                    .headers(responseHeaders)
+                    .contentLength(body.length)
+                    .body(resource);
+        } catch (Exception e) {
+            System.err.println("[ERROR] Failed to proxy remote file: " + e.getMessage());
+            return ResponseEntity.status(HttpStatus.BAD_GATEWAY).build();
+        }
+    }
+
     FileSystemResource resource = new FileSystemResource(p.toFile());
     String filename = p.getFileName().toString();
     String encodedFilename = URLEncoder.encode(filename, StandardCharsets.UTF_8.toString()).replace("+", "%20");

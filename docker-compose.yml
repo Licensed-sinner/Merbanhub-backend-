@@ -39,6 +39,8 @@ services:
       # doesn't mix host Windows paths with container paths. The host folder is
       # mounted below via a service volume mapping.
       OCR_BASE_PATH: /ocr
+      OCR_API_URL: ${OCR_API_URL}
+      OCR_API_TOKEN: ${OCR_API_TOKEN}
 
     depends_on:
       mysql:

@@ -5,9 +5,17 @@ import com.merbancapital.backend.dto.SearchResponse;
 import com.merbancapital.backend.model.Document;
 import org.springframework.stereotype.Service;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.web.client.RestTemplate;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.client.HttpClientErrorException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.type.TypeReference;
+import org.springframework.http.HttpStatus;
 
 import jakarta.annotation.PostConstruct;
 import java.io.IOException;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Instant;
@@ -24,6 +32,12 @@ public class DocumentSearchService {
         @Value("${ocr.base.path:uploads}")
         private String ocrBasePath;
 
+        // When set, operate in remote OCR mode and call the OCR API instead of local FS
+        @Value("${ocr.api.url:}")
+        private String ocrApiUrl;
+        @Value("${ocr.api.token:}")
+        private String ocrApiToken;
+
 
 
 
@@ -32,11 +46,19 @@ public class DocumentSearchService {
 
         @PostConstruct
         public void init() {
-                System.out.println("[DocumentSearchService] Initializing with OCR base path: " + ocrBasePath);
-                scanOcrFolders();
+                System.out.println("[DocumentSearchService] Initializing. local OCR base path=" + ocrBasePath
+                                + ", ocrApiUrl=" + (ocrApiUrl == null || ocrApiUrl.isBlank() ? "(none)" : ocrApiUrl));
+                if (isRemote()) {
+                        listRemoteFiles();
+                } else {
+                        scanOcrFolders();
+                }
         }
 
         public void scanOcrFolders() {
+                // If running in remote OCR mode, avoid scanning local filesystem
+                if (isRemote()) return;
+
                 List<Document> newDocuments = new ArrayList<>();
                 List<Path> directoriesToScan = List.of(
                                 Paths.get(ocrBasePath, FULLY_INDEXED_DIR),
@@ -89,6 +111,123 @@ public class DocumentSearchService {
                                         + documents.size());
                 }
         }
+
+        /**
+         * Populate documents list by calling remote OCR /api/files/list which must return a JSON array of filenames.
+         */
+        public void listRemoteFiles() {
+                List<Document> newDocuments = new ArrayList<>();
+                try {
+                            RestTemplate rt = new RestTemplate();
+                            org.springframework.http.HttpHeaders headers = new org.springframework.http.HttpHeaders();
+                            if (ocrApiToken != null && !ocrApiToken.isBlank()) {
+                                    headers.set("Authorization", "Bearer " + ocrApiToken);
+                            }
+                            org.springframework.http.HttpEntity<Void> req = new org.springframework.http.HttpEntity<>(headers);
+
+                            // Try a list of common list endpoints in case the deployed OCR uses a different path
+                            String[] candidates = new String[]{
+                                            "api/files/list",
+                                            "files/list",
+                                            "list",
+                                            "api/files",
+                                            "files"
+                            };
+                            ObjectMapper mapper = new ObjectMapper();
+                            String successfulUrl = null;
+                            String responseBody = null;
+                            for (String c : candidates) {
+                                    String url = ocrApiUrl.endsWith("/") ? ocrApiUrl + c : ocrApiUrl + "/" + c;
+                                    try {
+                                            ResponseEntity<String> resp = rt.exchange(url, org.springframework.http.HttpMethod.GET, req, String.class);
+                                            if (resp.getStatusCode().is2xxSuccessful()) {
+                                                    successfulUrl = url;
+                                                    responseBody = resp.getBody();
+                                                    break;
+                                            } else if (resp.getStatusCode() == HttpStatus.NOT_FOUND) {
+                                                    // try next candidate
+                                                    continue;
+                                            } else {
+                                                    // log and continue trying other endpoints
+                                                    System.out.println("[DocumentSearchService] Tried " + url + " -> status=" + resp.getStatusCodeValue());
+                                                    continue;
+                                            }
+                                    } catch (HttpClientErrorException.NotFound nf) {
+                                            // endpoint not present on server, try next
+                                            continue;
+                                    } catch (Exception e) {
+                                            System.err.println("[DocumentSearchService] Error calling " + url + " : " + e.getMessage());
+                                            continue;
+                                    }
+                            }
+
+                            if (successfulUrl != null && responseBody != null && !responseBody.isBlank()) {
+                                    // Try parsing as simple string array first
+                                    try {
+                                            String[] names = mapper.readValue(responseBody, String[].class);
+                                            for (String name : names) {
+                                                    Document d = new Document();
+                                                    d.setFileName(name);
+                                                    d.setFileSize(0L);
+                                                    d.setDateModified(Instant.now());
+                                                    String encoded = URLEncoder.encode(name, StandardCharsets.UTF_8.toString()).replace("+", "%20");
+                                                    // Build download URL using the successful base and standard file path
+                                                    String base = successfulUrl.endsWith("/list") ? successfulUrl.substring(0, successfulUrl.length() - 5) : (successfulUrl.endsWith("/") ? successfulUrl : successfulUrl + "/");
+                                                    d.setFilePath(base + "api/files/" + encoded);
+                                                    newDocuments.add(d);
+                                            }
+                                    } catch (Exception ex) {
+                                            // Not a plain string array, try list of objects with name/url
+                                            try {
+                                                    List<Map<String, Object>> objs = mapper.readValue(responseBody, new TypeReference<List<Map<String, Object>>>(){});
+                                                    for (Map<String, Object> obj : objs) {
+                                                            String name = null;
+                                                            String url = null;
+                                                            if (obj.containsKey("filename")) name = String.valueOf(obj.get("filename"));
+                                                            if (obj.containsKey("fileName")) name = String.valueOf(obj.get("fileName"));
+                                                            if (obj.containsKey("name")) name = String.valueOf(obj.get("name"));
+                                                            if (obj.containsKey("url")) url = String.valueOf(obj.get("url"));
+                                                            if (name == null && url != null) {
+                                                                    // attempt to extract name from url
+                                                                    try { name = Paths.get(new java.net.URI(url).getPath()).getFileName().toString(); } catch (Exception ignore) {}
+                                                            }
+                                                            if (name != null) {
+                                                                    Document d = new Document();
+                                                                    d.setFileName(name);
+                                                                    d.setFileSize(0L);
+                                                                    d.setDateModified(Instant.now());
+                                                                    if (url != null && !url.isBlank()) d.setFilePath(url);
+                                                                    else {
+                                                                            String encoded = URLEncoder.encode(name, StandardCharsets.UTF_8.toString()).replace("+", "%20");
+                                                                            String base = successfulUrl.endsWith("/list") ? successfulUrl.substring(0, successfulUrl.length() - 5) : (successfulUrl.endsWith("/") ? successfulUrl : successfulUrl + "/");
+                                                                            d.setFilePath(base + "api/files/" + encoded);
+                                                                    }
+                                                                    newDocuments.add(d);
+                                                            }
+                                                    }
+                                            } catch (Exception ex2) {
+                                                    System.err.println("[DocumentSearchService] Could not parse remote list response: " + ex2.getMessage());
+                                            }
+                                    }
+                            } else {
+                                    System.err.println("[ERROR] No remote OCR list endpoint responded successfully among candidates.");
+                            }
+                } catch (Exception e) {
+                            System.err.println("[ERROR] Failed to list remote OCR files: " + e.getMessage());
+                }
+                synchronized (documents) {
+                        documents.clear();
+                        documents.addAll(newDocuments);
+                        System.out.println("[DocumentSearchService] Loaded " + documents.size() + " docs from remote OCR");
+                }
+        }
+
+        public boolean isRemote() { return ocrApiUrl != null && !ocrApiUrl.isBlank(); }
+
+        public String getOcrApiUrl() { return ocrApiUrl; }
+
+                // Expose token safely so other beans/controllers can attach Authorization headers
+                public String getOcrApiToken() { return ocrApiToken; }
 
         public SearchResponse search(SearchFilters f) {
                 List<Document> filtered = new ArrayList<>(documents);
@@ -169,7 +308,19 @@ public class DocumentSearchService {
                 List<Path> dirs = List.of(
                                 Paths.get(ocrBasePath, FULLY_INDEXED_DIR),
                                 Paths.get(ocrBasePath, PARTIALLY_INDEXED_DIR));
-                for (Path dir : dirs) {
+                        // If we're operating in remote mode, the documents list contains
+                        // remote file URLs. Check that first.
+                        if (isRemote()) {
+                                synchronized (documents) {
+                                        for (Document d : documents) {
+                                                if (d.getFileName() != null && d.getFileName().equalsIgnoreCase(safeName)) {
+                                                        return Optional.of(Paths.get(d.getFilePath()));
+                                                }
+                                        }
+                                }
+                        }
+
+                        for (Path dir : dirs) {
                         if (Files.exists(dir) && Files.isDirectory(dir)) {
                                 try (Stream<Path> s = Files.list(dir)) {
                                         Optional<Path> found = s.filter(Files::isRegularFile)
