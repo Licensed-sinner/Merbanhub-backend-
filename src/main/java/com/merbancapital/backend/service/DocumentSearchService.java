@@ -107,9 +107,8 @@ public class DocumentSearchService {
                                                     d.setFileSize(0L);
                                                     d.setDateModified(Instant.now());
                                                     String encoded = URLEncoder.encode(name, StandardCharsets.UTF_8.toString()).replace("+", "%20");
-                                                    // Build download URL using the successful base and standard file path
-                                                    String base = successfulUrl.endsWith("/list") ? successfulUrl.substring(0, successfulUrl.length() - 5) : (successfulUrl.endsWith("/") ? successfulUrl : successfulUrl + "/");
-                                                    d.setFilePath(base + "api/files/" + encoded);
+                                                    String root = (ocrApiUrl.endsWith("/")) ? ocrApiUrl : ocrApiUrl + "/";
+                                                    d.setFilePath(root + "api/files/" + encoded);
                                                     newDocuments.add(d);
                                             }
                                     } catch (Exception ex) {
@@ -135,8 +134,8 @@ public class DocumentSearchService {
                                                                     if (url != null && !url.isBlank()) d.setFilePath(url);
                                                                     else {
                                                                             String encoded = URLEncoder.encode(name, StandardCharsets.UTF_8.toString()).replace("+", "%20");
-                                                                            String base = successfulUrl.endsWith("/list") ? successfulUrl.substring(0, successfulUrl.length() - 5) : (successfulUrl.endsWith("/") ? successfulUrl : successfulUrl + "/");
-                                                                            d.setFilePath(base + "api/files/" + encoded);
+                                                                            String root = (ocrApiUrl.endsWith("/")) ? ocrApiUrl : ocrApiUrl + "/";
+                                                                            d.setFilePath(root + "api/files/" + encoded);
                                                                     }
                                                                     newDocuments.add(d);
                                                             }
@@ -164,6 +163,22 @@ public class DocumentSearchService {
 
                 // Expose token safely so other beans/controllers can attach Authorization headers
                 public String getOcrApiToken() { return ocrApiToken; }
+
+        /**
+         * Remote helper: return the full remote download URL for a given filename (case-insensitive).
+         */
+        public Optional<String> getRemoteFileUrl(String filename) {
+                if (filename == null || filename.isBlank() || !isRemote()) return Optional.empty();
+                String safe = filename.trim();
+                synchronized (documents) {
+                        for (Document d : documents) {
+                                if (d.getFileName() != null && d.getFileName().equalsIgnoreCase(safe)) {
+                                        return Optional.ofNullable(d.getFilePath());
+                                }
+                        }
+                }
+                return Optional.empty();
+        }
 
         public SearchResponse search(SearchFilters f) {
                 List<Document> filtered = new ArrayList<>(documents);

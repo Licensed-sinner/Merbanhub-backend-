@@ -53,13 +53,10 @@ public class DocumentController {
      */
     @GetMapping("/files")
     public ResponseEntity<Resource> getIndexedFile(@RequestParam("name") String name) throws IOException {
-    var opt = documentSearchService.findFileInIndexedFolders(name);
-    if (opt.isEmpty()) return ResponseEntity.notFound().build();
-
-    Path p = opt.get();
-    // Remote-only mode: Path may wrap a URL string; proxy bytes from OCR service
     if (documentSearchService.isRemote()) {
-        String remoteUrl = p.toString();
+        var remoteUrlOpt = documentSearchService.getRemoteFileUrl(name);
+        if (remoteUrlOpt.isEmpty()) return ResponseEntity.notFound().build();
+        String remoteUrl = remoteUrlOpt.get();
         try {
             RestTemplate rt = new RestTemplate(new SimpleClientHttpRequestFactory());
             org.springframework.http.HttpHeaders remoteHeaders = new org.springframework.http.HttpHeaders();
@@ -74,7 +71,8 @@ public class DocumentController {
             }
             byte[] body = resp.getBody();
             if (body == null) return ResponseEntity.status(HttpStatus.BAD_GATEWAY).build();
-            String filename = Paths.get(p.toString()).getFileName().toString();
+            // Derive filename from requested name (safer than remote URL path parsing here)
+            String filename = Paths.get(name).getFileName().toString();
             String encodedFilename = URLEncoder.encode(filename, StandardCharsets.UTF_8.toString()).replace("+", "%20");
 
             HttpHeaders responseHeaders = new HttpHeaders();
@@ -98,7 +96,7 @@ public class DocumentController {
         }
     }
 
-    // Local filesystem download deprecated in remote-only mode
+    // Remote-only mode: no local fallback
     return ResponseEntity.status(HttpStatus.GONE).build();
     }
 
