@@ -31,9 +31,6 @@ public class FileController {
     @Autowired
     private FileService fileService;
 
-    @Value("${ocr.base.path}")
-    private String ocrBasePath;
-
     @Value("${ocr.api.url:}")
     private String ocrApiUrl;
     @Value("${ocr.api.token:}")
@@ -70,8 +67,8 @@ public class FileController {
                     "hint", "send as multipart/form-data with key 'file' (type=File)"
             ));
         }
-        // If a remote OCR URL is configured, forward the upload to the OCR service
-        if (ocrApiUrl != null && !ocrApiUrl.isBlank()) {
+    // Always prefer remote OCR (application is remote-only now)
+    if (ocrApiUrl != null && !ocrApiUrl.isBlank()) {
             try {
                 RestTemplate rt = new RestTemplate();
                 String url = ocrApiUrl.endsWith("/") ? ocrApiUrl + "api/files/upload" : ocrApiUrl + "/api/files/upload";
@@ -89,7 +86,7 @@ public class FileController {
                 HttpEntity<MultiValueMap<String, Object>> requestEntity = new HttpEntity<>(body, headers);
 
                 ResponseEntity<String> resp = rt.postForEntity(url, requestEntity, String.class);
-                int code = resp.getStatusCodeValue();
+                int code = resp.getStatusCode().value();
                 String bodyText = resp.getBody();
                 System.out.println("[BACKEND] Forwarded upload to OCR: " + url + " -> status=" + code + ", body=" + bodyText);
                 if (resp.getStatusCode().is2xxSuccessful()) {
@@ -104,7 +101,7 @@ public class FileController {
             }
         }
 
-        // Fallback: Delegate storage to FileService so uploads and listing use the same directory
+    // Fallback (no remote configured): Delegate storage to FileService temp fallback
         String stored;
         try {
             stored = fileService.store(file);

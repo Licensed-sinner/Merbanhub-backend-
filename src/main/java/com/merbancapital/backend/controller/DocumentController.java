@@ -57,8 +57,7 @@ public class DocumentController {
     if (opt.isEmpty()) return ResponseEntity.notFound().build();
 
     Path p = opt.get();
-    // If the DocumentSearchService is configured to use a remote OCR API, the stored Path
-    // may actually be a remote URL in filePath. Detect remote mode and proxy the file.
+    // Remote-only mode: Path may wrap a URL string; proxy bytes from OCR service
     if (documentSearchService.isRemote()) {
         String remoteUrl = p.toString();
         try {
@@ -99,20 +98,8 @@ public class DocumentController {
         }
     }
 
-    FileSystemResource resource = new FileSystemResource(p.toFile());
-    String filename = p.getFileName().toString();
-    String encodedFilename = URLEncoder.encode(filename, StandardCharsets.UTF_8.toString()).replace("+", "%20");
-
-    HttpHeaders headers = new HttpHeaders();
-    headers.setContentType(MediaType.APPLICATION_PDF);
-    headers.setContentDisposition(org.springframework.http.ContentDisposition.builder("inline")
-        .filename(encodedFilename)
-        .build());
-    headers.setCacheControl("max-age=3600, must-revalidate");
-
-    return ResponseEntity.ok()
-        .headers(headers)
-        .body(resource);
+    // Local filesystem download deprecated in remote-only mode
+    return ResponseEntity.status(HttpStatus.GONE).build();
     }
 
     /**

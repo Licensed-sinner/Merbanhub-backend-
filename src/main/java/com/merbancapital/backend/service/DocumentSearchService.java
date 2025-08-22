@@ -13,24 +13,18 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import org.springframework.http.HttpStatus;
 
 import jakarta.annotation.PostConstruct;
-import java.io.IOException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
-import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Instant;
 import java.util.*;
 import java.util.Optional;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 @Service
 public class DocumentSearchService {
 
         private List<Document> documents = Collections.synchronizedList(new ArrayList<>());
-
-        @Value("${ocr.base.path:uploads}")
-        private String ocrBasePath;
 
         // When set, operate in remote OCR mode and call the OCR API instead of local FS
         @Value("${ocr.api.url:}")
@@ -41,75 +35,17 @@ public class DocumentSearchService {
 
 
 
-        private static final String FULLY_INDEXED_DIR = "fully_indexed";
-        private static final String PARTIALLY_INDEXED_DIR = "partially_indexed";
+        // Legacy directory constants removed (remote-only mode)
 
         @PostConstruct
         public void init() {
-                System.out.println("[DocumentSearchService] Initializing. local OCR base path=" + ocrBasePath
-                                + ", ocrApiUrl=" + (ocrApiUrl == null || ocrApiUrl.isBlank() ? "(none)" : ocrApiUrl));
-                if (isRemote()) {
-                        listRemoteFiles();
-                } else {
-                        scanOcrFolders();
-                }
+                System.out.println("[DocumentSearchService] Initializing (remote-only). ocrApiUrl=" + (ocrApiUrl == null || ocrApiUrl.isBlank() ? "(none)" : ocrApiUrl));
+                listRemoteFiles();
         }
 
         public void scanOcrFolders() {
-                // If running in remote OCR mode, avoid scanning local filesystem
-                if (isRemote()) return;
-
-                List<Document> newDocuments = new ArrayList<>();
-                List<Path> directoriesToScan = List.of(
-                                Paths.get(ocrBasePath, FULLY_INDEXED_DIR),
-                                Paths.get(ocrBasePath, PARTIALLY_INDEXED_DIR));
-                for (Path dirPath : directoriesToScan) {
-                        if (Files.exists(dirPath) && Files.isDirectory(dirPath)) {
-                                try (Stream<Path> paths = Files.list(dirPath)) {
-                                        paths.filter(Files::isRegularFile)
-                                                        .forEach(filePath -> {
-                                                                try {
-                                                                        BasicFileAttributes attr = Files.readAttributes(
-                                                                                        filePath,
-                                                                                        BasicFileAttributes.class);
-                                                                        String fileName = filePath.getFileName()
-                                                                                        .toString();
-                                                                        long fileSize = attr.size();
-                                                                        long lastModified = attr.lastModifiedTime()
-                                                                                        .toMillis();
-                                                                        String absolutePath = filePath.toAbsolutePath()
-                                                                                        .toString();
-                                                                        Document doc = new Document();
-                                                                        doc.setFileName(fileName);
-                                                                        doc.setFileSize(fileSize);
-                                                                        doc.setDateModified(Instant.ofEpochMilli(lastModified));
-                                                                        doc.setFilePath(absolutePath);
-                                                                        // fileExtension extraction
-                                                                        int idx = fileName.lastIndexOf('.');
-                                                                        if (idx >= 0) doc.setFileExtension(fileName.substring(idx));
-                                                                        newDocuments.add(doc);
-                                                                } catch (IOException e) {
-                                                                        System.err.println(
-                                                                                        "[ERROR] Could not read attributes for file: "
-                                                                                                        + filePath
-                                                                                                        + " - "
-                                                                                                        + e.getMessage());
-                                                                }
-                                                        });
-                                } catch (IOException e) {
-                                        System.err.println("[ERROR] Could not list files in directory: " + dirPath
-                                                        + " - " + e.getMessage());
-                                }
-                        } else {
-                                System.out.println("[WARNING] OCR directory not found or not a directory: " + dirPath);
-                        }
-                }
-                synchronized (documents) {
-                        documents.clear();
-                        documents.addAll(newDocuments);
-                        System.out.println("[DocumentSearchService] Rescanned. Total documents loaded: "
-                                        + documents.size());
-                }
+                // No-op: local filesystem scanning removed in remote-only configuration.
+                System.out.println("[DocumentSearchService] scanOcrFolders() skipped (remote-only mode)");
         }
 
         /**
@@ -149,7 +85,7 @@ public class DocumentSearchService {
                                                     continue;
                                             } else {
                                                     // log and continue trying other endpoints
-                                                    System.out.println("[DocumentSearchService] Tried " + url + " -> status=" + resp.getStatusCodeValue());
+                                                    System.out.println("[DocumentSearchService] Tried " + url + " -> status=" + resp.getStatusCode());
                                                     continue;
                                             }
                                     } catch (HttpClientErrorException.NotFound nf) {
@@ -298,41 +234,15 @@ public class DocumentSearchService {
                 if (filename == null || filename.isBlank()) return Optional.empty();
                 String safeName = Paths.get(filename).getFileName().toString();
 
-                Path p1 = Paths.get(ocrBasePath, FULLY_INDEXED_DIR, safeName);
-                if (Files.exists(p1) && Files.isRegularFile(p1)) return Optional.of(p1);
-
-                Path p2 = Paths.get(ocrBasePath, PARTIALLY_INDEXED_DIR, safeName);
-                if (Files.exists(p2) && Files.isRegularFile(p2)) return Optional.of(p2);
-
-                // Try case-insensitive search in the two directories
-                List<Path> dirs = List.of(
-                                Paths.get(ocrBasePath, FULLY_INDEXED_DIR),
-                                Paths.get(ocrBasePath, PARTIALLY_INDEXED_DIR));
-                        // If we're operating in remote mode, the documents list contains
-                        // remote file URLs. Check that first.
-                        if (isRemote()) {
-                                synchronized (documents) {
-                                        for (Document d : documents) {
-                                                if (d.getFileName() != null && d.getFileName().equalsIgnoreCase(safeName)) {
-                                                        return Optional.of(Paths.get(d.getFilePath()));
-                                                }
-                                        }
-                                }
-                        }
-
-                        for (Path dir : dirs) {
-                        if (Files.exists(dir) && Files.isDirectory(dir)) {
-                                try (Stream<Path> s = Files.list(dir)) {
-                                        Optional<Path> found = s.filter(Files::isRegularFile)
-                                                        .filter(pp -> pp.getFileName().toString().equalsIgnoreCase(safeName))
-                                                        .findFirst();
-                                        if (found.isPresent()) return found;
-                                } catch (IOException e) {
-                                        // ignore and continue
+                // Remote-only: search in loaded document list
+                synchronized (documents) {
+                        for (Document d : documents) {
+                                if (d.getFileName() != null && d.getFileName().equalsIgnoreCase(safeName)) {
+                                        // filePath may be a URL; wrap as Path using just filename for downstream logic.
+                                        try { return Optional.of(Paths.get(d.getFilePath())); } catch (Exception ignored) { return Optional.of(Paths.get(safeName)); }
                                 }
                         }
                 }
-
                 return Optional.empty();
         }
 }
